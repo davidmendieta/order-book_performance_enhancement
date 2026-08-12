@@ -3,6 +3,7 @@
 #include <numeric>
 #include <chrono>
 #include <ctime>
+#include <optional>
 
 void Orderbook::PruneGoodForDayOrders()
 {    
@@ -14,7 +15,7 @@ void Orderbook::PruneGoodForDayOrders()
 		const auto now = system_clock::now();
 		const auto now_c = system_clock::to_time_t(now);
 		std::tm now_parts;
-		localtime_s(&now_parts, &now_c);
+    localtime_r(&now_c, &now_parts);
 
 		if (now_parts.tm_hour >= end.count())
 			now_parts.tm_mday += 1;
@@ -26,28 +27,32 @@ void Orderbook::PruneGoodForDayOrders()
 		auto next = system_clock::from_time_t(mktime(&now_parts));
 		auto till = next - now + milliseconds(100);
 
-		{
-			std::unique_lock ordersLock{ ordersMutex_ };
+    {
+      std::unique_lock ordersLock{ ordersMutex_ };
 
-			if (shutdown_.load(std::memory_order_acquire) ||
-				shutdownConditionVariable_.wait_for(ordersLock, till) == std::cv_status::no_timeout)
-				return;
-		}
+      // Predicate overload: re-checks shutdown_ on every wakeup and, crucially,
+      // before parking. A plain wait_for would miss a notify_one() that landed
+      // between the flag being set and this thread going to sleep, then block
+      // until `till` (up to ~24h) and deadlock the destructor's join().
+      if (shutdownConditionVariable_.wait_for(ordersLock, till,
+            [this] { return shutdown_.load(std::memory_order_acquire); }))
+        return;
+    }
 
 		OrderIds orderIds;
 
 		{
 			std::scoped_lock ordersLock{ ordersMutex_ };
 
-			for (const auto& [_, entry] : orders_)
-			{
-				const auto& [order, _] = entry;
+      for (const auto& [_, entry] : orders_)
+      {
+        const auto& order = entry.order_;
 
-				if (order->GetOrderType() != OrderType::GoodForDay)
-					continue;
+        if (order->GetOrderType() != OrderType::GoodForDay)
+          continue;
 
-				orderIds.push_back(order->GetOrderId());
-			}
+        orderIds.push_back(order->GetOrderId());
+      }
 		}
 
 		CancelOrders(orderIds);
@@ -143,10 +148,13 @@ bool Orderbook::CanFullyFill(Side side, Price price, Quantity quantity) const
 
 	for (const auto& [levelPrice, levelData] : data_)
 	{
-		if (threshold.has_value() &&
-			(side == Side::Buy && threshold.value() > levelPrice) ||
-			(side == Side::Sell && threshold.value() < levelPrice))
-			continue;
+    // The outer parens around the || group are load-bearing: && binds tighter
+    // than ||, so without them the threshold.has_value() guard attached only to
+    // the Buy branch and the Sell branch was evaluated independently of it.
+    if (threshold.has_value() &&
+      ((side == Side::Buy && threshold.value() > levelPrice) ||
+       (side == Side::Sell && threshold.value() < levelPrice)))
+      continue;
 
 		if ((side == Side::Buy && levelPrice > price) ||
 			(side == Side::Sell && levelPrice < price))
@@ -231,14 +239,18 @@ Trades Orderbook::MatchOrders()
 
         if (bids.empty())
         {
-            bids_.erase(bidPrice);
-            data_.erase(bidPrice);
+            // Copy the price out first: erasing the map node invalidates
+            // bidPrice, which is a reference into that node.
+            const Price price = bidPrice;
+            bids_.erase(price);
+            data_.erase(price);
         }
 
         if (asks.empty())
         {
-            asks_.erase(askPrice);
-            data_.erase(askPrice);
+            const Price price = askPrice;
+            asks_.erase(price);
+            data_.erase(price);
         }
 	}
 
@@ -265,9 +277,16 @@ Orderbook::Orderbook() : ordersPruneThread_{ [this] { PruneGoodForDayOrders(); }
 
 Orderbook::~Orderbook()
 {
+  {
+    // The flag must be set under the same mutex the prune thread holds across
+    // its check-and-wait, otherwise the store can slip into that window and
+    // the notify below is lost.
+    std::scoped_lock ordersLock{ ordersMutex_ };
     shutdown_.store(true, std::memory_order_release);
-	shutdownConditionVariable_.notify_one();
-	ordersPruneThread_.join();
+  }
+
+  shutdownConditionVariable_.notify_one();
+  ordersPruneThread_.join();
 }
 
 Trades Orderbook::AddOrder(OrderPointer order)

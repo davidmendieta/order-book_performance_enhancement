@@ -1,6 +1,6 @@
 #include "pch.h"
 
-#include "../Orderbook.cpp"
+#include "Orderbook.h"
 
 namespace googletest = ::testing;
 
@@ -201,11 +201,10 @@ public:
 
 class OrderbookTestsFixture : public googletest::TestWithParam<const char*> 
 {
-private:
-    const static inline std::filesystem::path Root{ std::filesystem::current_path() };
-    const static inline std::filesystem::path TestFolder{ "TestFiles" };
 public:
-    const static inline std::filesystem::path TestFolderPath{ Root / TestFolder };
+    // Baked in at compile time by the Makefile so the binary can be run from
+    // any working directory.
+    const static inline std::filesystem::path TestFolderPath{ TEST_FILES_DIR };
 };
 
 TEST_P(OrderbookTestsFixture, OrderbookTestSuite)
@@ -270,7 +269,7 @@ TEST_P(OrderbookTestsFixture, OrderbookTestSuite)
     ASSERT_EQ(orderbookInfos.GetAsks().size(), result.askCount_);
 }
 
-INSTANTIATE_TEST_CASE_P(Tests, OrderbookTestsFixture, googletest::ValuesIn({
+INSTANTIATE_TEST_SUITE_P(Tests, OrderbookTestsFixture, googletest::ValuesIn({
     "Match_GoodTillCancel.txt",
     "Match_FillAndKill.txt",
     "Match_FillOrKill_Hit.txt",
