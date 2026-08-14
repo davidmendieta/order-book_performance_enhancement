@@ -1,11 +1,3 @@
-# Orderbook - macOS/clang build
-#
-# Layout:
-#   include/     public headers
-#   src/         engine sources + main
-#   tests/       gtest suite + TestFiles fixtures
-#   benchmarks/  perf harness (empty for now)
-#
 # Usage:
 #   make              build the orderbook binary (release)
 #   make test         build and run the gtest suite
@@ -49,7 +41,7 @@ TEST_CXXFLAGS := -Itests -I$(GTEST_PREFIX)/include \
                  -DTEST_FILES_DIR='"$(CURDIR)/tests/TestFiles"'
 GTEST_LIBS    := -L$(GTEST_PREFIX)/lib -lgtest -lgtest_main
 
-.PHONY: all run test debug asan clean help check-gtest
+.PHONY: all run test stress debug asan clean help check-gtest
 
 all: $(BIN)
 
@@ -66,6 +58,13 @@ run: $(BIN)
 
 test: $(TEST_BIN)
 	./$(TEST_BIN)
+
+# Repeat the suite to shake out flaky/probabilistic failures.
+# Note: a deadlock will hang this indefinitely rather than reporting - if it
+# stops producing output, that IS the signal. Attach with: sample <pid> 1
+ITERS ?= 60
+stress: $(TEST_BIN)
+	./$(TEST_BIN) --gtest_repeat=$(ITERS)
 
 $(TEST_BIN): $(TEST_OBJS) $(LIB_OBJS)
 	@mkdir -p $(dir $@)
@@ -95,6 +94,7 @@ help:
 	@echo "  all     build $(BIN) (default)"
 	@echo "  run     build and run the orderbook binary"
 	@echo "  test    build and run the gtest suite"
+	@echo "  stress  run the suite ITERS times (default 60) to catch flakiness"
 	@echo "  debug   build with MODE=debug (-O0 -g)"
 	@echo "  asan    build with MODE=asan (address+undefined sanitizers)"
 	@echo "  clean   remove the build directory"
